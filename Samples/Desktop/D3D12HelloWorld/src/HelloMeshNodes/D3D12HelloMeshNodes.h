@@ -123,12 +123,8 @@ private:
 
 HRESULT CompileDxilLibraryFromFile(
     _In_ LPCWSTR pFile,
-    _In_ LPCWSTR pEntry,
-    _In_ LPCWSTR pTarget,
     _In_reads_(cArgs) LPCWSTR args[],
     _In_ UINT cArgs,
-    _In_reads_(cDefines) DxcDefine* pDefines,
-    _In_ UINT cDefines,
     _Out_ ID3DBlob** ppCode);
 
 

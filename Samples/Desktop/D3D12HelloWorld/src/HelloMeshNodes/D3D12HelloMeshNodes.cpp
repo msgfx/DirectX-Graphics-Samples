@@ -256,17 +256,70 @@ void D3D12HelloMeshNodes::CreateWorkGraph()
         ComPtr<ID3DBlob> libShaders;
 
         // Compile shaders
+
+        LPCWSTR cArg1[] = {
+            L"-E PSMain",
+            L"-T ps_6_0",
+
+            L"-Zi",
+            L"-Fd",
+            L"test1.pdb",
+
+            L"-Fo",         // for output .il
+            L"test1.obj",
+
+            L"-Od",         // disable optimizations
+
+            //L"-Qembed_debug",
+            //L"-Qstrip_debug",
+            //L"-Qstrip_reflect",
+            //L"-Qstrip_priv",
+        };
+
+        LPCWSTR cArg2[] = {
+            L"-E PSMain2",
+            L"-T ps_6_0",
+
+            L"-Zi",
+            L"-Fd",
+            L"test2.pdb",
+
+            L"-Fo",         // for output .il
+            L"test2.obj",
+
+            L"-Od",         // disable optimizations
+
+            //L"-Qembed_debug",
+            //L"-Qstrip_debug",
+            //L"-Qstrip_reflect",
+
+        };
         
         // Pixel shaders must be compiled via non-lib shader target, e.g. ps_6_0:
         ThrowIfFailed(CompileDxilLibraryFromFile(
             GetAssetFullPath(L"shaders.hlsl").c_str(), 
-            L"PSMain", L"ps_6_0", nullptr, 0, nullptr, 0, &pixelShader));
+            cArg1, _countof(cArg1), &pixelShader));
 
         ThrowIfFailed(CompileDxilLibraryFromFile(
             GetAssetFullPath(L"shaders.hlsl").c_str(), 
-            L"PSMain2", L"ps_6_0", nullptr, 0, nullptr, 0, &pixelShader2));
+            cArg2, _countof(cArg2), &pixelShader2));
 
-        LPCWSTR cDefines[] = { 
+        LPCWSTR cArg3[] = {
+            L"-T lib_6_9",
+
+            L"-Zi",
+            L"-Fd",
+            L".\\",
+
+            L"-Fo",             // for output .il
+            L"shaders.obj",
+
+            L"-Od",             // disable optimizations
+
+            //L"-Qembed_debug",
+            //L"-Qstrip_debug",
+            //L"-Qstrip_reflect",
+
             L"-D LIB_TARGET", 
             L"-select-validator internal", 
             L"-enable-16bit-types"};
@@ -274,7 +327,7 @@ void D3D12HelloMeshNodes::CreateWorkGraph()
         // Node shaders use lib target, lib_6_9 here for mesh node support:
         ThrowIfFailed(CompileDxilLibraryFromFile(
             GetAssetFullPath(L"shaders.hlsl").c_str(), 
-            nullptr, L"lib_6_9", cDefines, _countof(cDefines), nullptr, 0, &libShaders));
+            cArg3, _countof(cArg3), &libShaders));
 
         ThrowIfFailed(m_device->CreateRootSignatureFromSubobjectInLibrary(0, 
             libShaders->GetBufferPointer(), 
@@ -734,14 +787,243 @@ void D3D12HelloMeshNodes::MakeBufferAndInitialize(
     UploadData(*ppResource, pInitialData, SizeInBytes, ppStagingResource, D3D12_RESOURCE_STATE_COMMON, doFlush);
 }
 
+namespace {
+    LPCWSTR GetDxcOutKindAsString(const DXC_OUT_KIND dxcOutKind)
+    {
+        switch (dxcOutKind)
+        {
+        case DXC_OUT_NONE:
+            return L"DXC_OUT_NONE";
+        case DXC_OUT_OBJECT:
+            return L"DXC_OUT_OBJECT";
+        case DXC_OUT_ERRORS:
+            return L"DXC_OUT_ERRORS";
+        case DXC_OUT_PDB:
+            return L"DXC_OUT_PDB";
+        case DXC_OUT_SHADER_HASH:
+            return L"DXC_OUT_SHADER_HASH";
+        case DXC_OUT_DISASSEMBLY:
+            return L"DXC_OUT_DISASSEMBLY";
+        case DXC_OUT_HLSL:
+            return L"DXC_OUT_HLSL";
+        case DXC_OUT_TEXT:
+            return L"DXC_OUT_TEXT";
+        case DXC_OUT_REFLECTION:
+            return L"DXC_OUT_REFLECTION";
+        case DXC_OUT_ROOT_SIGNATURE:
+            return L"DXC_OUT_ROOT_SIGNATURE";
+        case DXC_OUT_EXTRA_OUTPUTS:
+            return L"DXC_OUT_EXTRA_OUTPUTS";
+        case DXC_OUT_REMARKS:
+            return L"DXC_OUT_REMARKS";
+        case DXC_OUT_TIME_REPORT:
+            return L"DXC_OUT_TIME_REPORT";
+        case DXC_OUT_TIME_TRACE:
+            return L"DXC_OUT_TIME_TRACE";
+        default:
+            return L"UNKNOWN";
+            break;
+        }
+    }
+
+    HRESULT GetProgramPath(std::wstring& outPath)
+    {
+        // Cached data
+        static std::wstring sPath;
+        if (sPath.empty())
+        {
+            WCHAR strBuff[1024];
+            if (0 == GetModuleFileNameW(nullptr, strBuff, _countof(strBuff)))
+            {
+                OutputDebugStringW(L"Failed to get executable path.");
+                return E_FAIL;
+            }
+            WCHAR strDrive[32];
+            WCHAR strDir[1024];
+            WCHAR strFilename[1024];
+            WCHAR strExt[32];
+            _wsplitpath_s(strBuff, strDrive, strDir, strFilename, strExt);
+            sPath = std::wstring(strDrive) + std::wstring(strDir);
+        }
+        outPath = sPath;
+
+        return S_OK;
+    }
+
+    HRESULT WriteShaderCompileResultToFile(IDxcResult* compileResult, DXC_OUT_KIND dxcOutKind)
+    {
+        if (DXC_OUT_PDB == dxcOutKind)
+        {
+            // Write pdb to file
+            CComPtr<IDxcBlob> pPDB = nullptr;
+            CComPtr<IDxcBlobWide> pPDBName = nullptr;
+            if (SUCCEEDED(compileResult->GetOutput(DXC_OUT_PDB, IID_PPV_ARGS(&pPDB), &pPDBName)) &&
+                pPDBName != nullptr)
+            {
+                std::wstring fullPath;
+                if (S_OK == GetProgramPath(fullPath))
+                {
+                    fullPath = fullPath + pPDBName->GetStringPointer();
+                }
+                else
+                {
+                    fullPath = pPDBName->GetStringPointer();
+                }
+                OutputDebugStringW(fullPath.c_str());
+                OutputDebugStringW(L"\n");
+
+                FILE* fp = NULL;
+                errno_t error = _wfopen_s(&fp, fullPath.c_str(), L"wb");
+                if (0 != error || NULL == fp)
+                {
+                    const std::wstring strTemp = fullPath + L" open is failed. error=" + std::to_wstring(error);
+                    OutputDebugStringW(strTemp.c_str());
+                    return E_FAIL;
+                }
+                else
+                {
+                    fwrite(pPDB->GetBufferPointer(), pPDB->GetBufferSize(), 1, fp);
+                    fclose(fp);
+                }
+
+                return S_OK;
+            }
+        }
+        else if (DXC_OUT_OBJECT == dxcOutKind)
+        {
+            // Write shader binary to file
+            CComPtr<IDxcBlob> pObject = nullptr;
+            CComPtr<IDxcBlobWide> pObjectName = nullptr;
+            if (SUCCEEDED(compileResult->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pObject), &pObjectName)) &&
+                pObjectName != nullptr)
+            {
+                std::wstring fullPath;
+                if (S_OK == GetProgramPath(fullPath))
+                {
+                    fullPath = fullPath + pObjectName->GetStringPointer();
+                }
+                else
+                {
+                    fullPath = pObjectName->GetStringPointer();
+                }
+                OutputDebugStringW(fullPath.c_str());
+                OutputDebugStringW(L"\n");
+
+                FILE* fp = NULL;
+                errno_t error = _wfopen_s(&fp, fullPath.c_str(), L"wb");
+                if (0 != error || NULL == fp)
+                {
+                    const std::wstring strTemp = fullPath + L" open is failed. error=" + std::to_wstring(error);
+                    OutputDebugStringW(strTemp.c_str());
+                    return E_FAIL;
+                }
+                else
+                {
+                    fwrite(pObject->GetBufferPointer(), pObject->GetBufferSize(), 1, fp);
+                    fclose(fp);
+                }
+
+                return S_OK;
+            }
+        }
+        else if (DXC_OUT_SHADER_HASH == dxcOutKind)
+        {
+            CComPtr<IDxcBlob> pShaderHash = nullptr;
+            if (SUCCEEDED(compileResult->GetOutput(DXC_OUT_SHADER_HASH, IID_PPV_ARGS(&pShaderHash), nullptr)) &&
+                pShaderHash != nullptr)
+            {
+                WCHAR strBuff[256];
+                OutputDebugStringW(L"Hash: ");
+                DxcShaderHash* pHashBuf = (DxcShaderHash*)pShaderHash->GetBufferPointer();
+                for (int i = 0, n = _countof(pHashBuf->HashDigest); i < n; ++i)
+                {
+                    swprintf_s(strBuff, L"%x", pHashBuf->HashDigest[i]);
+                    OutputDebugStringW(strBuff);
+                }
+                OutputDebugStringW(L"\n");
+
+                return S_OK;
+            }
+        }
+
+        return S_OK;
+    }
+
+    HRESULT WriteShaderDisassembleResultToFile(IDxcCompiler3* compiler, IDxcResult* compileResult)
+    {
+        // Disassemble (DXIL)
+        CComPtr<IDxcBlob> pObject = nullptr;
+        CComPtr<IDxcBlobWide> pObjectName = nullptr;
+        if (SUCCEEDED(compileResult->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pObject), &pObjectName)) &&
+            pObjectName != nullptr)
+        {
+            DxcBuffer dxcObjBuffer;
+            dxcObjBuffer.Ptr = pObject->GetBufferPointer();
+            dxcObjBuffer.Size = pObject->GetBufferSize();
+            dxcObjBuffer.Encoding = DXC_CP_ACP;
+
+            ComPtr<IDxcResult> disassembleResult;
+            HRESULT hr = compiler->Disassemble(&dxcObjBuffer, IID_PPV_ARGS(&disassembleResult));
+            if (FAILED(hr))
+            {
+                return hr;
+            }
+#if _DEBUG
+            for (UINT32 i = 0, n = disassembleResult->GetNumOutputs(); i < n; ++i)
+            {
+                std::wstring strBuff = L"Disassemble Output [" + std::to_wstring(i) + L"] : ";
+                const DXC_OUT_KIND dxcOutKind = disassembleResult->GetOutputByIndex(i);
+                strBuff += GetDxcOutKindAsString(dxcOutKind);
+                strBuff += L" ( " + std::to_wstring(dxcOutKind) + L" ) \n";
+                OutputDebugStringW(strBuff.c_str());
+            }
+#endif
+            // Disassembly
+            CComPtr<IDxcBlob> pDXIL = nullptr;
+            if (SUCCEEDED(disassembleResult->GetOutput(DXC_OUT_DISASSEMBLY, IID_PPV_ARGS(&pDXIL), nullptr)) &&
+                pDXIL != nullptr)
+            {
+                std::wstring fullPath;
+                if (S_OK == GetProgramPath(fullPath))
+                {
+                    fullPath = fullPath + pObjectName->GetStringPointer();
+                    fullPath += L".il";
+                }
+                else
+                {
+                    fullPath = pObjectName->GetStringPointer();
+                    fullPath += L".il";
+                }
+                OutputDebugStringW(fullPath.c_str());
+                OutputDebugStringW(L"\n");
+
+                FILE* fp = NULL;
+                errno_t error = _wfopen_s(&fp, fullPath.c_str(), L"wb");
+                if (0 != error || NULL == fp)
+                {
+                    const std::wstring strTemp = fullPath + L" open is failed. error=" + std::to_wstring(error);
+                    OutputDebugStringW(strTemp.c_str());
+                    return E_FAIL;
+                }
+                else
+                {
+                    fwrite(pDXIL->GetBufferPointer(), pDXIL->GetBufferSize(), 1, fp);
+                    fclose(fp);
+                }
+
+                return S_OK;
+            }
+        }
+
+        return E_FAIL;
+    }
+
+}; /// namespace
+
 HRESULT CompileDxilLibraryFromFile(
     _In_ LPCWSTR pFile,
-    _In_ LPCWSTR pEntry,
-    _In_ LPCWSTR pTarget,
     _In_reads_(cArgs) LPCWSTR args[],
     _In_ UINT cArgs,
-    _In_reads_(cDefines) DxcDefine* pDefines,
-    _In_ UINT cDefines,
     _Out_ ID3DBlob** ppCode)
 {
     HRESULT hr = S_OK;
@@ -769,10 +1051,10 @@ HRESULT CompileDxilLibraryFromFile(
         }
     }
 
-    ComPtr<IDxcCompiler> compiler;
+    ComPtr<IDxcCompiler3> compiler;
     ComPtr<IDxcLibrary> library;
     ComPtr<IDxcBlobEncoding> source;
-    ComPtr<IDxcOperationResult> operationResult;
+    ComPtr<IDxcResult> compileResult;
     ComPtr<IDxcIncludeHandler> includeHandler;
     hr = s_pDxcCreateInstanceProc(CLSID_DxcLibrary, IID_PPV_ARGS(&library));
     if (FAILED(hr))
@@ -801,35 +1083,61 @@ HRESULT CompileDxilLibraryFromFile(
         return hr;
     }
 
+    DxcBuffer sourceBuffer;
+    sourceBuffer.Ptr = source->GetBufferPointer();
+    sourceBuffer.Size = source->GetBufferSize();
+    sourceBuffer.Encoding = DXC_CP_ACP;
+
     hr = compiler->Compile(
-        source.Get(),
-        nullptr,
-        pEntry,
-        pTarget,
+        &sourceBuffer,
         args, cArgs,
-        pDefines, cDefines,
         includeHandler.Get(),
-        &operationResult);
+        IID_PPV_ARGS(&compileResult));
+
     if (FAILED(hr))
     {
         OutputDebugStringA("Failed to compile.");
         return hr;
     }
 
-    operationResult->GetStatus(&hr);
+    compileResult->GetStatus(&hr);
     if (SUCCEEDED(hr))
     {
-        hr = operationResult->GetResult((IDxcBlob**)ppCode);
+        hr = compileResult->GetResult((IDxcBlob**)ppCode);
         if (FAILED(hr))
         {
             OutputDebugStringA("Failed to retrieve compiled code.");
         }
     }
     CComPtr<IDxcBlobEncoding> pErrors;
-    if (SUCCEEDED(operationResult->GetErrorBuffer(&pErrors)))
+    if (SUCCEEDED(compileResult->GetErrorBuffer(&pErrors)))
     {
         OutputDebugStringA((LPCSTR)pErrors->GetBufferPointer());
     }
+
+    // Debug
+#if _DEBUG
+    for (UINT32 i=0, n=compileResult->GetNumOutputs(); i < n; ++i)
+    {
+        std::wstring strBuff = L"Output [" + std::to_wstring(i) + L"] : ";
+        const DXC_OUT_KIND dxcOutKind = compileResult->GetOutputByIndex(i);
+        strBuff += GetDxcOutKindAsString(dxcOutKind);
+        strBuff += L" ( " + std::to_wstring(dxcOutKind) + L" ) \n";
+        OutputDebugStringW(strBuff.c_str());
+    }
+#endif
+
+    // Write PDB to file
+    WriteShaderCompileResultToFile(compileResult.Get(), DXC_OUT_PDB);
+
+    // Write Shader Binary to file
+    WriteShaderCompileResultToFile(compileResult.Get(), DXC_OUT_OBJECT);
+
+    // Display Shader Hash
+    WriteShaderCompileResultToFile(compileResult.Get(), DXC_OUT_SHADER_HASH);
+
+    // Disassemble (DXIL)
+    WriteShaderDisassembleResultToFile(compiler.Get(), compileResult.Get());
 
     return hr;
 }
